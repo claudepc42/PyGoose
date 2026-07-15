@@ -74,6 +74,7 @@ A `config.ini` is created automatically on first run. Edit it to customize behav
 | Key | Default | Description |
 |-----|---------|-------------|
 | `SilenceSounds` | `false` | Mute all sounds |
+| `SilenceMusic` | `false` | Mute background music only (honks and other sounds still play) |
 | `AttackRandomly` | `false` | Goose attacks mouse unprompted |
 | `Task_CanAttackMouse` | `true` | Allow mouse-stealing at all |
 | `UseCustomColors` | `false` | Enable custom goose colors |

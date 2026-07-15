@@ -30,7 +30,7 @@ def _make_player(volume: float) -> tuple[QMediaPlayer, QAudioOutput]:
 
 
 class Sound:
-    def __init__(self, silence: bool = False):
+    def __init__(self, silence: bool = False, silence_music: bool = False):
         self._silence = silence
         if silence:
             return
@@ -65,7 +65,7 @@ class Sound:
 
         self._music_player: tuple[QMediaPlayer, QAudioOutput] | None = None
         self._music_decoder = None
-        if _exists("Music.mp3"):
+        if _exists("Music.mp3") and not silence_music:
             p, a = _make_player(0.5)
             p.setSource(QUrl.fromLocalFile(self._music_source()))
             p.setLoops(QMediaPlayer.Loops.Infinite)

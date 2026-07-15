@@ -11,7 +11,9 @@ if sys.platform == "win32":
         ]
 
     def set_cursor_clip(x: float, y: float, w: float, h: float):
-        rect = _RECT(int(x), int(y), int(x + max(w, 1)), int(y + max(h, 1)))
+        from PyQt6.QtGui import QGuiApplication
+        dpr = QGuiApplication.primaryScreen().devicePixelRatio()
+        rect = _RECT(int(x * dpr), int(y * dpr), int((x + max(w, 1)) * dpr), int((y + max(h, 1)) * dpr))
         ctypes.windll.user32.ClipCursor(ctypes.byref(rect))
 
     def release_cursor_clip():

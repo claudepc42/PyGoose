@@ -278,7 +278,8 @@ class Goose:
         self._freak_bounce_b: Vector2 = Vector2.zero
         self._freak_bounce_to_a: bool = True
 
-        self.sound = Sound(silence=config.silence_sounds if config else False)
+        self.sound = Sound(silence=config.silence_sounds if config else False,
+                           silence_music=config.silence_music if config else False)
         self.time_keeper = TimeKeeper()
         self._set_task(Task.WANDER, honk=False)
 
@@ -715,7 +716,8 @@ class Goose:
 
     def _get_cursor_pos(self) -> Vector2:
         p = QCursor.pos()
-        return Vector2(float(p.x()), float(p.y()))
+        origin = QApplication.primaryScreen().geometry()
+        return Vector2(float(p.x() - origin.x()), float(p.y() - origin.y()))
 
     # -----------------------------------------------------------------------
     # Task: CollectWindow

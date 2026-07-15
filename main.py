@@ -65,6 +65,11 @@ def main():
     if sys.platform == "darwin":
         _detach_from_terminal()
 
+    # Ensure Qt uses the exact DPI scale factor (no rounding of e.g. 1.25 → 1)
+    # so that logical-pixel geometry and QCursor.pos() stay in the same coordinate space.
+    QApplication.setHighDpiScaleFactorRoundingPolicy(
+        Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
+    )
     app = QApplication(sys.argv)
 
     if sys.platform == "darwin":

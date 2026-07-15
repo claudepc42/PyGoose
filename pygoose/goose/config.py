@@ -12,6 +12,7 @@ class GooseConfig:
     version: int = CONFIG_VERSION
     enable_mods: bool = False
     silence_sounds: bool = False
+    silence_music: bool = False
     task_can_attack_mouse: bool = True
     attack_randomly: bool = False
     use_custom_colors: bool = False
@@ -49,6 +50,7 @@ def _save(cfg: GooseConfig, path: str):
         "Version":                  str(cfg.version),
         "EnableMods":               str(cfg.enable_mods),
         "SilenceSounds":            str(cfg.silence_sounds),
+        "SilenceMusic":             str(cfg.silence_music),
         "Task_CanAttackMouse":      str(cfg.task_can_attack_mouse),
         "AttackRandomly":           str(cfg.attack_randomly),
         "UseCustomColors":          str(cfg.use_custom_colors),
@@ -97,6 +99,7 @@ def load_config() -> GooseConfig:
             version=version,
             enable_mods=g.getboolean("EnableMods", False),
             silence_sounds=g.getboolean("SilenceSounds", False),
+            silence_music=g.getboolean("SilenceMusic", False),
             task_can_attack_mouse=g.getboolean("Task_CanAttackMouse", True),
             attack_randomly=g.getboolean("AttackRandomly", False),
             use_custom_colors=g.getboolean("UseCustomColors", False),
