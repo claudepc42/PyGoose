@@ -2,7 +2,7 @@
 
 A Python/PyQt6 reimplementation of [samperson's Desktop Goose](https://samperson.itch.io/desktop-goose) — a chaotic little goose that wanders your screen, steals your mouse, and leaves you passive-aggressive notes.
 
-![Version](https://img.shields.io/badge/version-0.36-orange) ![Python](https://img.shields.io/badge/python-3.12%2B-blue) ![PyQt6](https://img.shields.io/badge/PyQt6-6.x-green) ![Windows](https://img.shields.io/badge/Windows-0078D6?logo=windows&logoColor=white) ![macOS](https://img.shields.io/badge/macOS-000000?logo=apple&logoColor=white) ![Linux](https://img.shields.io/badge/Linux-FCC624?logo=linux&logoColor=black)
+![Version](https://img.shields.io/badge/version-0.37-orange) ![Python](https://img.shields.io/badge/python-3.12%2B-blue) ![PyQt6](https://img.shields.io/badge/PyQt6-6.x-green) ![Windows](https://img.shields.io/badge/Windows-0078D6?logo=windows&logoColor=white) ![macOS](https://img.shields.io/badge/macOS-000000?logo=apple&logoColor=white) ![Linux](https://img.shields.io/badge/Linux-FCC624?logo=linux&logoColor=black)
 
 ---
 
@@ -22,6 +22,7 @@ A goose lives on your desktop. He has opinions about you. He will:
 - **Deliver notepad messages** — handwritten, passive-aggressive, non-negotiable. Keeps up to 2 on screen; evicts one to make room for the next
 - **Drop memes** on your screen that you have to deal with — same 2-window rule applies
 - **Carry things in** — walks offscreen and returns carrying a knife in his beak. Wanders with it for a while, then either places it deliberately or drops it mid-stride and walks off
+- **Threaten you** — sometimes the knife gives him ideas. He'll approach your cursor, lock eyes, bob his head aggressively, and make faint lunges. Hold your nerve and he triumphantly honks and does a victory lap. Get too close and he panics and flees
 - **Track mud** across everything while running amok
 - **Sleep in the corner** — circles down in a spiral, tucks his head, and takes a nap
 - **Fake sleep** — sometimes he's just pretending, and if he opens one eye and you're too close, he panics
@@ -113,6 +114,7 @@ Drop `.ttf` or `.otf` font files into `assets/fonts/`. The first loaded font is 
 | Collect Notepad | Drags a passive-aggressive notepad message onto your screen. Keeps up to 2 notes on screen at once — if 2 are already up, grabs a random one and drags it back offscreen before fetching a new one |
 | Collect Meme | Drags a meme image onto your screen. Same 2-window limit and eviction behavior as notepad |
 | Carry Prop | Walks offscreen and returns carrying a knife in his beak. Wanders for a while, then either places it carefully on the ground or drops it mid-walk and moves on. If there's already one on screen, picks it up instead of fetching a new one |
+| Knife Threat | Armed and with opinions. Approaches your cursor, locks eyes, bobs his head aggressively, and makes faint lunges. Stay still long enough and he honks in triumph and does a gloating victory lap. Move too close and he panics and flees |
 | Sleep | Walks to a corner, circles in a shrinking spiral, then tucks in for 90 seconds to 8 minutes |
 | Fake Sleep | Looks like real sleep but isn't — see above |
 | Peek Back | Post-freak-out return sequence: crawl to edge, peek in, sweep gaze, walk back |
