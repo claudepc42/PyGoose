@@ -1,14 +1,20 @@
 import os
-from PyQt6.QtMultimedia import QMediaPlayer, QAudioOutput
+import wave
+from PyQt6.QtMultimedia import QMediaPlayer, QAudioOutput, QAudioDecoder, QAudioFormat
 from PyQt6.QtCore import QUrl
 
 from pygoose.engine.math_utils import get_rng
+from pygoose.paths import resource_path, user_data_path
 
-SOUNDS_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "assets", "sounds")
+# Looping MP3 decode costs ~2% of a CPU core for the entire session. The music
+# is decoded once (in the background, first run) to a PCM WAV cache; subsequent
+# sessions play the cache through the identical QMediaPlayer pipeline — same
+# decoder output, same volume, same loop — with near-zero per-frame DSP cost.
+MUSIC_CACHE_PARTS = ("assets", "music_cache.wav")
 
 
 def _path(filename: str) -> str:
-    return os.path.abspath(os.path.join(SOUNDS_DIR, filename))
+    return resource_path("assets", "sounds", filename)
 
 
 def _exists(filename: str) -> bool:
@@ -24,7 +30,7 @@ def _make_player(volume: float) -> tuple[QMediaPlayer, QAudioOutput]:
 
 
 class Sound:
-    def __init__(self, silence: bool = False):
+    def __init__(self, silence: bool = False, silence_music: bool = False):
         self._silence = silence
         if silence:
             return
@@ -58,12 +64,88 @@ class Sound:
                 self._pat_players.append((p, a))
 
         self._music_player: tuple[QMediaPlayer, QAudioOutput] | None = None
-        if _exists("Music.mp3"):
+        self._music_decoder = None
+        if _exists("Music.mp3") and not silence_music:
             p, a = _make_player(0.5)
-            p.setSource(QUrl.fromLocalFile(_path("Music.mp3")))
+            p.setSource(QUrl.fromLocalFile(self._music_source()))
             p.setLoops(QMediaPlayer.Loops.Infinite)
             self._music_player = (p, a)
             p.play()
+
+    # ------------------------------------------------------------------
+    # Music PCM cache
+    # ------------------------------------------------------------------
+
+    def _music_source(self) -> str:
+        """Path the music player should use: the PCM cache when valid,
+        otherwise the MP3 (and kick off a background cache build)."""
+        cache = user_data_path(*MUSIC_CACHE_PARTS)
+        if self._music_cache_valid(cache):
+            return cache
+        self._start_music_cache_build(cache)
+        return _path("Music.mp3")
+
+    @staticmethod
+    def _music_cache_valid(cache: str) -> bool:
+        try:
+            with wave.open(cache, "rb") as w:
+                return w.getnframes() > 0
+        except Exception:
+            return False
+
+    def _start_music_cache_build(self, cache: str):
+        """Decode Music.mp3 to PCM in the background and write the WAV cache
+        atomically. Any failure leaves no cache; the MP3 path keeps working."""
+        try:
+            decoder = QAudioDecoder()
+            want = QAudioFormat()
+            want.setSampleFormat(QAudioFormat.SampleFormat.Int16)
+            want.setChannelCount(2)
+            want.setSampleRate(44100)
+            decoder.setAudioFormat(want)
+            decoder.setSource(QUrl.fromLocalFile(_path("Music.mp3")))
+            chunks: list[bytes] = []
+            actual: dict = {}
+
+            def on_ready():
+                buf = decoder.read()
+                f = buf.format()
+                actual["sf"] = f.sampleFormat()
+                actual["ch"] = f.channelCount()
+                actual["rate"] = f.sampleRate()
+                ptr = buf.constData()
+                ptr.setsize(buf.byteCount())
+                chunks.append(bytes(ptr))
+
+            def on_finished():
+                try:
+                    # Only cache if the backend honoured Int16; the WAV header
+                    # must describe the bytes exactly or playback would differ.
+                    if chunks and actual.get("sf") == QAudioFormat.SampleFormat.Int16:
+                        os.makedirs(os.path.dirname(cache), exist_ok=True)
+                        tmp = cache + ".tmp"
+                        with wave.open(tmp, "wb") as w:
+                            w.setnchannels(actual["ch"])
+                            w.setsampwidth(2)
+                            w.setframerate(actual["rate"])
+                            w.writeframes(b"".join(chunks))
+                        os.replace(tmp, cache)  # atomic — never half-written
+                except Exception:
+                    pass
+                self._music_decoder = None
+
+            def on_error(_err):
+                self._music_decoder = None
+
+            decoder.bufferReady.connect(on_ready)
+            decoder.finished.connect(on_finished)
+            decoder.error.connect(on_error)
+            decoder.start()
+            self._music_decoder = decoder  # keep referenced while decoding
+        except Exception:
+            self._music_decoder = None
+
+    # ------------------------------------------------------------------
 
     def honk(self):
         if self._silence or not self._honk_players:

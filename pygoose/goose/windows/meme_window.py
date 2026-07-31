@@ -6,6 +6,7 @@ from PyQt6.QtGui import QPainter, QPixmap, QMovie, QColor, QFont
 
 from pygoose.goose.windows.movable_window import MovableWindow
 from pygoose.engine.deck import Deck
+from pygoose.paths import user_data_path
 
 SUPPORTED_EXTS = (".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp")
 
@@ -80,9 +81,9 @@ WINDOW_TITLES = [
     "honk. that's it. that's the message.",
 ]
 
-ASSETS_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "..", "assets", "images", "memes")
 
 _placeholder_deck: Deck | None = None
+_meme_deck: Deck | None = None
 
 
 def _get_placeholder_deck() -> Deck:
@@ -92,8 +93,15 @@ def _get_placeholder_deck() -> Deck:
     return _placeholder_deck
 
 
+def _get_meme_deck(n: int) -> Deck:
+    global _meme_deck
+    if _meme_deck is None or len(_meme_deck.indices) != n:
+        _meme_deck = Deck(n)
+    return _meme_deck
+
+
 def _local_images() -> list[str]:
-    d = os.path.abspath(ASSETS_DIR)
+    d = user_data_path("assets", "images", "memes")
     if not os.path.isdir(d):
         return []
     return [
@@ -120,8 +128,7 @@ class MemeWindow(MovableWindow):
 
         images = _local_images()
         if images:
-            deck = Deck(len(images))
-            self._load_local(images[deck.next()])
+            self._load_local(images[_get_meme_deck(len(images)).next()])
         else:
             msg = PLACEHOLDER_MESSAGES[_get_placeholder_deck().next()]
             self._label.setPixmap(_make_placeholder(msg))
@@ -143,4 +150,3 @@ class MemeWindow(MovableWindow):
     @pyqtSlot()
     def show_dialog(self):
         self.show()
-        self.raise_()

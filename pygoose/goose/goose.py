@@ -1,14 +1,16 @@
 from __future__ import annotations
 import math
+import random
+# Module-level aliases so hot per-tick task handlers don't re-import every frame
+_math = math
+_random = random
 
-# Dev testing flags — set DEV_FORCE_TASK to a Task name string to force that task, or None for normal
-DEV_FORCE_TASK = "watch_mouse"
-DEV_SHORT_WANDER = True
 from dataclasses import dataclass, field
 from enum import Enum
 
 from PyQt6.QtWidgets import QApplication
-from PyQt6.QtCore import QMetaObject, Qt
+from PyQt6.QtCore import QMetaObject, Qt, QRect
+from PyQt6.QtGui import QCursor
 
 from pygoose.engine.vector2 import Vector2
 from pygoose.engine.math_utils import lerp, clamp, random_range
@@ -16,9 +18,29 @@ from pygoose.engine.easings import cubic_ease_in_out
 from pygoose.engine.rig import Rig
 from pygoose.engine.deck import Deck
 from pygoose.engine.time_keeper import TimeKeeper, DELTA_TIME
-from pygoose.goose.renderer import update_rig, render_goose, render_foot_marks
+from pygoose.goose.renderer import (
+    update_rig, render_goose, render_goose_body, render_goose_head,
+    render_foot_marks, FOOT_MARK_LIFETIME, FOOT_MARK_SHRINK_TIME,
+)
 from pygoose.goose.cursor import set_cursor_clip, release_cursor_clip, is_left_mouse_down
 from pygoose.goose.sound import Sound
+import pygoose.goose.behaviors.wander      as _b_wander
+import pygoose.goose.behaviors.track_mud   as _b_track_mud
+import pygoose.goose.behaviors.nab_mouse   as _b_nab_mouse
+import pygoose.goose.behaviors.watch_mouse  as _b_watch_mouse
+import pygoose.goose.behaviors.follow_mouse  as _b_follow_mouse
+import pygoose.goose.behaviors.sneak_attack  as _b_sneak_attack
+import pygoose.goose.behaviors.sleep         as _b_sleep
+import pygoose.goose.behaviors.peek_back     as _b_peek_back
+import pygoose.goose.behaviors.collect_window as _b_collect
+import pygoose.goose.behaviors.carry_prop    as _b_carry_prop
+import pygoose.goose.behaviors.knife_threat  as _b_knife_threat
+from pygoose.goose.behaviors.sleep    import SleepStage
+from pygoose.goose.behaviors.peek_back import PeekBackStage
+from pygoose.goose.behaviors.watch_mouse import WatchSubState
+from pygoose.goose.props.prop import Prop, PropType, PropState
+from pygoose.goose.props.prop_renderer import render_props
+from pygoose.goose.props.physics import tick_props
 
 
 # ---------------------------------------------------------------------------
@@ -26,11 +48,13 @@ from pygoose.goose.sound import Sound
 # ---------------------------------------------------------------------------
 
 class SpeedTier(Enum):
-    WALK = "walk"
-    RUN = "run"
+    SNEAK  = "sneak"
+    WALK   = "walk"
+    RUN    = "run"
     CHARGE = "charge"
 
 SPEEDS = {
+    SpeedTier.SNEAK:  {"speed": 28.0,  "acceleration": 600.0,  "step_time": 0.45},
     SpeedTier.WALK:   {"speed": 80.0,  "acceleration": 1300.0, "step_time": 0.2},
     SpeedTier.RUN:    {"speed": 200.0, "acceleration": 1300.0, "step_time": 0.2},
     SpeedTier.CHARGE: {"speed": 400.0, "acceleration": 2300.0, "step_time": 0.1},
@@ -42,26 +66,39 @@ SPEEDS = {
 # ---------------------------------------------------------------------------
 
 class Task(Enum):
-    WANDER = "wander"
-    NAB_MOUSE = "nab_mouse"
-    COLLECT_WINDOW_MEME = "collect_window_meme"
-    COLLECT_WINDOW_NOTEPAD = "collect_window_notepad"
-    COLLECT_WINDOW_EXEC = "collect_window_exec"
-    TRACK_MUD = "track_mud"
-    WATCH_MOUSE = "watch_mouse"
+    WANDER                = "wander"
+    NAB_MOUSE             = "nab_mouse"
+    COLLECT_WINDOW_MEME   = "collect_window_meme"
+    COLLECT_WINDOW_NOTEPAD= "collect_window_notepad"
+    TRACK_MUD             = "track_mud"
+    WATCH_MOUSE           = "watch_mouse"
+    FOLLOW_MOUSE          = "follow_mouse"
+    SNEAK_ATTACK          = "sneak_attack"
+    SLEEP                 = "sleep"
+    PEEK_BACK             = "peek_back"
+    CARRY_PROP            = "carry_prop"
+    KNIFE_THREAT          = "knife_threat"
 
 
 TASK_WEIGHTED_LIST = [
+    Task.TRACK_MUD,                 # 2/18
     Task.TRACK_MUD,
-    Task.TRACK_MUD,
+    Task.COLLECT_WINDOW_MEME,       # 2/18
     Task.COLLECT_WINDOW_MEME,
-    Task.COLLECT_WINDOW_MEME,
+    Task.COLLECT_WINDOW_NOTEPAD,    # 2/18
     Task.COLLECT_WINDOW_NOTEPAD,
+    Task.NAB_MOUSE,                 # 3/18
     Task.NAB_MOUSE,
     Task.NAB_MOUSE,
-    Task.NAB_MOUSE,
+    Task.WATCH_MOUSE,               # 2/18
     Task.WATCH_MOUSE,
-    Task.WATCH_MOUSE,
+    Task.FOLLOW_MOUSE,              # 2/18
+    Task.FOLLOW_MOUSE,
+    Task.SNEAK_ATTACK,              # 1/18
+    Task.SLEEP,                     # 1/18
+    Task.CARRY_PROP,                # 3/18
+    Task.CARRY_PROP,
+    Task.CARRY_PROP,
 ]
 
 
@@ -75,119 +112,13 @@ class ScreenDirection(Enum):
     TOP = "top"
 
 
-# ---------------------------------------------------------------------------
-# Wander state
-# ---------------------------------------------------------------------------
-
-@dataclass
-class WanderState:
-    wander_start_time: float
-    wander_duration: float
-    pause_start_time: float = -1.0
-    pause_duration: float = 0.0
-
-WANDER_GOOD_ENOUGH_DIST = 20.0
 
 
-# ---------------------------------------------------------------------------
-# CollectWindow state
-# ---------------------------------------------------------------------------
-
-class CollectWindowStage(Enum):
-    WALKING_OFFSCREEN = "walking_offscreen"
-    WAITING_TO_BRING_WINDOW_BACK = "waiting_to_bring_window_back"
-    DRAGGING_WINDOW_BACK = "dragging_window_back"
-
-WAIT_TIME_MIN = 2.0
-WAIT_TIME_MAX = 3.5
-
-@dataclass
-class CollectWindowState:
-    stage: CollectWindowStage = CollectWindowStage.WALKING_OFFSCREEN
-    screen_direction: "ScreenDirection | None" = None
-    main_window: object = None
-    window_offset_to_beak: Vector2 = field(default_factory=lambda: Vector2(0.0, 0.0))
-    wait_start_time: float = 0.0
-    secs_to_wait: float = 0.0
-    window_closed_early: bool = False
 
 
-# ---------------------------------------------------------------------------
-# NabMouse state
-# ---------------------------------------------------------------------------
-
-class NabMouseStage(Enum):
-    SEEKING_MOUSE = "seeking_mouse"
-    DRAGGING_MOUSE_AWAY = "dragging_mouse_away"
-    DECELERATING = "decelerating"
-
-MOUSE_GRAB_DISTANCE = 15.0
-MOUSE_SUCC_TIME = 0.06
-MOUSE_DROP_DISTANCE = 30.0
-GIVE_UP_TIME = 9.0
-STRUGGLE_RANGE = Vector2(3.0, 3.0)
-
-@dataclass
-class NabMouseState:
-    stage: NabMouseStage = NabMouseStage.SEEKING_MOUSE
-    chase_start_time: float = 0.0
-    grabbed_time: float = 0.0
-    original_vector_to_mouse: Vector2 = field(default_factory=lambda: Vector2(0.0, 0.0))
-    drag_to: Vector2 = field(default_factory=lambda: Vector2(0.0, 0.0))
 
 
-# ---------------------------------------------------------------------------
-# TrackMud state
-# ---------------------------------------------------------------------------
 
-class TrackMudStage(Enum):
-    DECIDE_TO_RUN = "decide_to_run"
-    RUNNING_OFFSCREEN = "running_offscreen"
-    RUNNING_WANDERING = "running_wandering"
-
-TRACK_MUD_DURATION = 15.0
-DIR_CHANGE_INTERVAL = 100.0
-AMOK_DURATION = 2.0
-
-@dataclass
-class TrackMudState:
-    stage: TrackMudStage = TrackMudStage.DECIDE_TO_RUN
-    next_dir_change_time: float = 0.0
-    time_to_stop_running: float = 0.0
-
-
-# ---------------------------------------------------------------------------
-# WatchMouse state
-# ---------------------------------------------------------------------------
-
-WATCH_MOUSE_DURATION_MIN = 8.0
-WATCH_MOUSE_DURATION_MAX = 16.0
-BOB_INTERVAL_MIN = 1.2
-BOB_INTERVAL_MAX = 3.5
-BOB_DURATION = 0.35
-WATCH_HONK_INTERVAL_MIN = 5.0
-WATCH_HONK_INTERVAL_MAX = 12.0
-WATCH_SUB_DURATION_MIN = 2.0
-WATCH_SUB_DURATION_MAX = 5.0
-
-class WatchSubState(Enum):
-    STAND_STILL = "stand_still"
-    WALK_SLOW   = "walk_slow"
-    SIT         = "sit"
-    CRAWL       = "crawl"  # sit pose while moving — reserved for future use
-
-SIT_MIN_DURATION = 15.0
-
-@dataclass
-class WatchMouseState:
-    start_time: float
-    duration: float
-    next_bob_time: float
-    next_honk_time: float
-    bob_end_time: float = -1.0
-    sub_state: WatchSubState = WatchSubState.WALK_SLOW
-    next_sub_change_time: float = 0.0
-    sit_entered_time: float = -1.0
 
 
 # ---------------------------------------------------------------------------
@@ -209,6 +140,57 @@ class FootMark:
 FEET_DISTANCE_APART = 6.0
 OVERSHOOT_FRACTION = 0.4
 WANT_STEP_AT_DISTANCE = 5.0
+
+# Dirty-rect extents around the goose position (px). Must fully contain every
+# drawn pixel in all states (extended neck, beak, shadow, feet, sleep bubbles,
+# exclamation) or repaints would clip. Measured worst-case extents across the
+# full state space (all directions, neck/sit/tuck extremes, bubbles, exclamation)
+# are L=49.5 R=51.3 U=96.0 D=36.5, so these are comfortably generous. (Shrinking
+# the box was measured to give no CPU benefit — Qt re-blits the whole translucent
+# layered window per update regardless of region — so we keep the safe margins.)
+DIRTY_LEFT  = 100
+DIRTY_RIGHT = 100
+DIRTY_UP    = 110
+DIRTY_DOWN  = 90
+
+
+# ---------------------------------------------------------------------------
+# Behavior dispatch tables — keyed on Task, populated after all imports
+# ---------------------------------------------------------------------------
+
+_BEHAVIOR_ENTER: dict = {}
+_BEHAVIOR_TICK:  dict = {}
+
+
+def _build_dispatch_tables():
+    _BEHAVIOR_ENTER[Task.WANDER]                 = _b_wander.enter
+    _BEHAVIOR_ENTER[Task.TRACK_MUD]              = _b_track_mud.enter
+    _BEHAVIOR_ENTER[Task.NAB_MOUSE]              = _b_nab_mouse.enter
+    _BEHAVIOR_ENTER[Task.COLLECT_WINDOW_NOTEPAD] = _b_collect.enter
+    _BEHAVIOR_ENTER[Task.COLLECT_WINDOW_MEME]    = _b_collect.enter
+    _BEHAVIOR_ENTER[Task.WATCH_MOUSE]            = _b_watch_mouse.enter
+    _BEHAVIOR_ENTER[Task.FOLLOW_MOUSE]           = _b_follow_mouse.enter
+    _BEHAVIOR_ENTER[Task.SNEAK_ATTACK]           = _b_sneak_attack.enter
+    _BEHAVIOR_ENTER[Task.SLEEP]                  = _b_sleep.enter
+    _BEHAVIOR_ENTER[Task.PEEK_BACK]              = _b_peek_back.enter
+    _BEHAVIOR_ENTER[Task.CARRY_PROP]             = _b_carry_prop.enter
+    _BEHAVIOR_ENTER[Task.KNIFE_THREAT]           = _b_knife_threat.enter
+
+    _BEHAVIOR_TICK[Task.WANDER]                 = _b_wander.tick
+    _BEHAVIOR_TICK[Task.TRACK_MUD]              = _b_track_mud.tick
+    _BEHAVIOR_TICK[Task.NAB_MOUSE]              = _b_nab_mouse.tick
+    _BEHAVIOR_TICK[Task.COLLECT_WINDOW_NOTEPAD] = _b_collect.tick
+    _BEHAVIOR_TICK[Task.COLLECT_WINDOW_MEME]    = _b_collect.tick
+    _BEHAVIOR_TICK[Task.WATCH_MOUSE]            = _b_watch_mouse.tick
+    _BEHAVIOR_TICK[Task.FOLLOW_MOUSE]           = _b_follow_mouse.tick
+    _BEHAVIOR_TICK[Task.SNEAK_ATTACK]           = _b_sneak_attack.tick
+    _BEHAVIOR_TICK[Task.SLEEP]                  = _b_sleep.tick
+    _BEHAVIOR_TICK[Task.PEEK_BACK]              = _b_peek_back.tick
+    _BEHAVIOR_TICK[Task.CARRY_PROP]             = _b_carry_prop.tick
+    _BEHAVIOR_TICK[Task.KNIFE_THREAT]           = _b_knife_threat.tick
+
+
+_build_dispatch_tables()
 
 
 class Goose:
@@ -249,26 +231,55 @@ class Goose:
         # Task
         self.task_picker_deck = Deck(len(TASK_WEIGHTED_LIST))
         self.current_task = Task.WANDER
-        self.task_wander: WanderState | None = None
-        self.task_track_mud: TrackMudState | None = None
-        self.task_nab_mouse: NabMouseState | None = None
-        self.task_collect_window: CollectWindowState | None = None
-        self.task_watch_mouse: WatchMouseState | None = None
+        self.task_state: object = None
 
-        # Window placed — watch for angry close
-        self._placed_window = None
-        self._placed_window_time = -1.0
-        self._placed_window_closed = False
-        self._placed_window_permanent = False  # if True, anger never expires
+        # Placed windows — up to 2 of each type kept on screen
+        self._placed_memes: list = []
+        self._placed_notepads: list = []
+        # Anger tracking: only the most recently placed window triggers NAB_MOUSE if closed
+        self._anger_window = None
+        self._anger_time = -1.0
+        self._anger_closed = False
+        self._anger_permanent = False
+
+        # Props
+        self.carrying_prop: Prop | None = None
+        self.props: list[Prop] = []
+        self._dev_debug_props = False
+        self._last_task_name: str = ""
+        self._pending_drop = False
+        self._pending_drop_deadline = 0.0
+        if config and config.dev_force_spawn_prop:
+            try:
+                pt = PropType(config.dev_force_spawn_prop.lower())
+                self.props.append(Prop(
+                    prop_type=pt,
+                    position=Vector2(270, self.screen_h - 728),
+                    state=PropState.PLACED,
+                ))
+                self._dev_debug_props = True
+            except ValueError:
+                pass
 
         # Mouse polling state
         self._last_mouse_down = False
 
+        # Render-skip: signature of the last frame's render-affecting state.
+        # When nothing that influences drawn pixels has changed, the overlay can
+        # skip the repaint entirely (the layered window keeps the last frame).
+        self._last_render_sig = None
+
         self._target_sit_lerp = 0.0
         self._target_neck_tuck = 0.0
         self._freeze_position = False
+        self._freak_out_until = -1.0
+        self._freak_out_next_honk = -1.0
+        self._freak_bounce_a: Vector2 = Vector2.zero
+        self._freak_bounce_b: Vector2 = Vector2.zero
+        self._freak_bounce_to_a: bool = True
 
-        self.sound = Sound(silence=config.silence_sounds if config else False)
+        self.sound = Sound(silence=config.silence_sounds if config else False,
+                           silence_music=config.silence_music if config else False)
         self.time_keeper = TimeKeeper()
         self._set_task(Task.WANDER, honk=False)
 
@@ -278,22 +289,140 @@ class Goose:
 
     def tick(self):
         self.time_keeper.tick()
-        self._check_placed_window()
+        t = self.time_keeper.time
+        tick_props(self.props, self.time_keeper.delta_time)
+        if self._pending_drop and self._pending_drop_deadline > 0 and t >= self._pending_drop_deadline:
+            self._do_drop_mid_walk()
+        self._check_placed_windows()
         self._check_petting()
         self._run_physics()
         self._solve_feet()
         self._update_neck()
         self.rig.sit_lerp_percent       = lerp(self.rig.sit_lerp_percent,       self._target_sit_lerp,  0.06)
         self.rig.neck_tuck_lerp_percent = lerp(self.rig.neck_tuck_lerp_percent, self._target_neck_tuck, 0.06)
+        sleeping = (self.current_task == Task.SLEEP
+                    and self.task_state is not None
+                    and self.task_state.stage == SleepStage.SLEEPING)
+        self.rig.is_sleeping = sleeping
+        self.rig.show_sleep_bubbles = sleeping and (self.task_state is not None and not self.task_state.is_fake_sleep)
+        if not sleeping:
+            self.rig.peek_eye = 0
+        if sleeping:
+            self.rig.sleep_phase += DELTA_TIME
 
     def render(self, painter):
+        render_props(painter, self.props, debug=self._dev_debug_props)
+        if self.config and self.config.dev_hide_goose:
+            return
         render_foot_marks(painter, self.foot_marks, self.time_keeper.time)
         update_rig(self.position, self.direction, self.rig)
-        render_goose(
-            painter, self.rig, self.position, self.direction,
-            self.l_foot_pos, self.r_foot_pos,
-            self.config,
+        if self.carrying_prop is not None:
+            from pygoose.goose.props.prop_renderer import _render_knife_in_beak, _render_shadow
+            fwd = Vector2.get_from_angle_degrees(self.direction)
+            knife_angle = self.direction + 90.0
+            shadow_prop = self.carrying_prop
+            shadow_prop.position = Vector2(
+                self.position.x + fwd.x * 31.0,
+                self.position.y + fwd.y * 25.0,
+            )
+            shadow_prop.z     = 30.0
+            shadow_prop.angle = knife_angle
+            _render_shadow(painter, shadow_prop)
+            render_goose_body(
+                painter, self.rig, self.position, self.direction,
+                self.l_foot_pos, self.r_foot_pos, self.config,
+            )
+            _render_knife_in_beak(painter, self.rig, self.direction)
+            render_goose_head(painter, self.rig, self.direction, self.config)
+        else:
+            render_goose(
+                painter, self.rig, self.position, self.direction,
+                self.l_foot_pos, self.r_foot_pos, self.config,
+            )
+        if self.config and (self.config.dev_force_task or self.config.dev_short_wander
+                            or self.config.dev_force_fake_sleep or self.config.dev_hide_goose):
+            self._render_dev_hud(painter)
+
+    def _render_dev_hud(self, painter) -> None:
+        from PyQt6.QtCore import QRectF
+        from PyQt6.QtGui import QColor, QFont
+        from PyQt6.QtCore import Qt
+        task_name = self.current_task.value if self.current_task else "?"
+        stage_name = ""
+        if self.task_state and hasattr(self.task_state, "stage"):
+            stage_name = f" / {self.task_state.stage.value}"
+        current_text = f"now:  {task_name}{stage_name}"
+        last_text    = f"last: {self._last_task_name or '—'}"
+        font = QFont("Courier New", 9)
+        painter.setFont(font)
+        fm = painter.fontMetrics()
+        pad = 6
+        line_h = fm.height()
+        w = max(fm.horizontalAdvance(current_text), fm.horizontalAdvance(last_text)) + pad * 2
+        h = line_h * 2 + pad * 2
+        x = int(self.screen_w // 2 - w // 2)
+        y = int(self.screen_h - h - 50)
+        w = int(w)
+        h = int(h)
+        painter.save()
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(0, 0, 0, 160))
+        painter.drawRoundedRect(x, y, w, h, 4, 4)
+        painter.setPen(QColor(220, 220, 220))
+        painter.drawText(QRectF(x + pad, y + pad, w - pad * 2, line_h), Qt.AlignmentFlag.AlignLeft, current_text)
+        painter.setPen(QColor(160, 160, 160))
+        painter.drawText(QRectF(x + pad, y + pad + line_h, w - pad * 2, line_h), Qt.AlignmentFlag.AlignLeft, last_text)
+        painter.restore()
+
+    def dirty_rect(self):
+        """Decide whether this frame needs repainting and, if so, which region.
+
+        Returns ``None`` when every pixel-affecting input is unchanged from the
+        last painted frame (the overlay then skips the repaint — the layered
+        window already holds identical pixels). Otherwise returns the QRect to
+        invalidate: the goose's box, unioned with any footmarks mid-shrink.
+
+        The signature below is the *complete* set of inputs consumed by
+        ``render_foot_marks`` + ``update_rig`` + ``render_goose``. Comparing the
+        raw values (not quantized) guarantees a skipped frame is bitwise
+        identical, so this can never change what the user sees.
+        """
+        rig = self.rig
+        # sleep_phase only affects pixels while bubbles are shown (real sleep);
+        # during fake sleep it still increments but draws nothing, so exclude it.
+        sleep_token = rig.sleep_phase if rig.show_sleep_bubbles else 0.0
+        sig = (
+            self.position.x, self.position.y, self.direction,
+            self.l_foot_pos.x, self.l_foot_pos.y,
+            self.r_foot_pos.x, self.r_foot_pos.y,
+            rig.sit_lerp_percent, rig.neck_tuck_lerp_percent, rig.neck_lerp_percent,
+            rig.is_sleeping, rig.show_sleep_bubbles, rig.peek_eye, rig.show_exclamation,
+            sleep_token,
         )
+
+        t = self.time_keeper.time
+        r = QRect(int(self.position.x) - DIRTY_LEFT, int(self.position.y) - DIRTY_UP,
+                  DIRTY_LEFT + DIRTY_RIGHT, DIRTY_UP + DIRTY_DOWN)
+        any_mark_animating = False
+        for m in self.foot_marks:
+            if m.time == 0.0:
+                continue
+            shrink_start = m.time + FOOT_MARK_LIFETIME
+            if shrink_start - 0.1 <= t <= shrink_start + FOOT_MARK_SHRINK_TIME + 0.1:
+                any_mark_animating = True
+                r = r.united(QRect(int(m.position.x) - 6, int(m.position.y) - 6, 12, 12))
+
+        if self._dev_debug_props or (self.config and (
+                self.config.dev_force_task or self.config.dev_short_wander
+                or self.config.dev_force_fake_sleep or self.config.dev_hide_goose)):
+            self._last_render_sig = sig
+            return QRect(0, 0, int(self.screen_w), int(self.screen_h))
+
+        changed = (sig != self._last_render_sig) or any_mark_animating
+        self._last_render_sig = sig
+        if not changed:
+            return None
+        return r
 
     # -----------------------------------------------------------------------
     # Speed
@@ -313,6 +442,22 @@ class Goose:
         to_target = Vector2.normalize(self.target_pos - self.position)
 
         self._run_ai()
+
+        # Freak-out is a physics override, not a task — see _run_physics
+        t = self.time_keeper.time
+        if self._freak_out_until > 0 and t < self._freak_out_until:
+            bounce_target = self._freak_bounce_a if self._freak_bounce_to_a else self._freak_bounce_b
+            self.target_pos = bounce_target
+            if Vector2.distance(self.position, bounce_target) < 30.0:
+                self._freak_bounce_to_a = not self._freak_bounce_to_a
+            self._set_speed(SpeedTier.CHARGE)
+            self._freeze_position = False
+            if t >= self._freak_out_next_honk:
+                self.sound.honk()
+                self._freak_out_next_honk = t + 0.3
+        elif self._freak_out_until > 0:
+            self._freak_out_until = -1.0
+            self._set_task(Task.PEEK_BACK, honk=False)
 
         # Turn toward target (lerp angle 25% per frame)
         if not (to_target.x == 0.0 and to_target.y == 0.0):
@@ -340,9 +485,14 @@ class Goose:
     # -----------------------------------------------------------------------
 
     def _get_foot_home(self, right_foot: bool) -> Vector2:
+        s = self.rig.sit_lerp_percent
         b = 1.0 if right_foot else 0.0
         side = Vector2.get_from_angle_degrees(self.direction + 90.0) * b
-        return self.position + side * FEET_DISTANCE_APART
+        # When crawling: reduce perpendicular spread and push feet downward so
+        # they poke below the lowered body in both left and right facing directions.
+        perp_dist  = lerp(FEET_DISTANCE_APART, 2.0, s)
+        crawl_drop = lerp(0.0, 8.0, s)
+        return self.position + side * perp_dist + Vector2(0.0, crawl_drop)
 
     def _solve_feet(self):
         t = self.time_keeper.time
@@ -405,43 +555,52 @@ class Goose:
     # -----------------------------------------------------------------------
 
     def _run_ai(self):
-        if self.current_task == Task.WANDER:
-            self._run_wander()
-        elif self.current_task == Task.TRACK_MUD:
-            self._run_track_mud()
-        elif self.current_task == Task.NAB_MOUSE:
-            self._run_nab_mouse()
-        elif self.current_task in (Task.COLLECT_WINDOW_NOTEPAD, Task.COLLECT_WINDOW_MEME, Task.COLLECT_WINDOW_EXEC):
-            self._run_collect_window()
-        elif self.current_task == Task.WATCH_MOUSE:
-            self._run_watch_mouse()
+        _BEHAVIOR_TICK[self.current_task](self)
 
     # -----------------------------------------------------------------------
     # Placed window anger check
     # -----------------------------------------------------------------------
 
-    def _check_placed_window(self):
-        if self._placed_window is None:
+    def _check_placed_windows(self):
+        if self._anger_window is None:
             return
         t = self.time_keeper.time
-        if self._placed_window_closed:
-            self._placed_window = None
-            self._placed_window_closed = False
+        if self._anger_closed:
+            self._anger_window = None
+            self._anger_closed = False
             self._set_task(Task.NAB_MOUSE)
-        elif not self._placed_window_permanent and t - self._placed_window_time >= 3.0:
-            self._placed_window = None
+        elif not self._anger_permanent and t - self._anger_time >= 3.0:
+            self._anger_window = None
 
-    def _on_placed_window_closed(self):
-        self._placed_window_closed = True
+    def _make_placed_window_close_cb(self, window, window_type: str):
+        def on_close():
+            lst = self._placed_memes if window_type == "meme" else self._placed_notepads
+            if window in lst:
+                lst.remove(window)
+            if self._anger_window is window:
+                self._anger_closed = True
+        return on_close
 
     # -----------------------------------------------------------------------
     # Petting detection
     # -----------------------------------------------------------------------
 
     def _check_petting(self):
-        import random as _random
-        from PyQt6.QtGui import QCursor
         mouse_down = is_left_mouse_down()
+        if mouse_down and not self._last_mouse_down:
+            cursor = QCursor.pos()
+            mouse_pos = Vector2(float(cursor.x()), float(cursor.y()))
+
+            if self._dev_debug_props and self.props:
+                from pygoose.goose.props.prop_renderer import get_debug_flip_rect, toggle_debug_side
+                frect = get_debug_flip_rect()
+                if frect:
+                    fx, fy, fw, fh = frect
+                    if fx <= mouse_pos.x <= fx + fw and fy <= mouse_pos.y <= fy + fh:
+                        toggle_debug_side(self.props[0], self.screen_w)
+                        self._last_mouse_down = mouse_down
+                        return
+
         if (self.current_task != Task.NAB_MOUSE
                 and mouse_down
                 and not self._last_mouse_down):
@@ -449,9 +608,14 @@ class Goose:
             mouse_pos = Vector2(float(cursor.x()), float(cursor.y()))
             goose_head = Vector2(self.position.x, self.position.y + 14.0)
             if Vector2.distance(goose_head, mouse_pos) < 30.0:
-                if (self.current_task == Task.WATCH_MOUSE
-                        and self.task_watch_mouse
-                        and self.task_watch_mouse.sub_state == WatchSubState.SIT):
+                if (self.current_task == Task.SLEEP
+                        and self.task_state
+                        and self.task_state.stage == SleepStage.SLEEPING):
+                    self.sound.honk()
+                    self._set_task(Task.WANDER)
+                elif (self.current_task == Task.WATCH_MOUSE
+                        and self.task_state
+                        and self.task_state.sub_state == WatchSubState.SIT):
                     r = _random.random()
                     if r < 0.70:
                         self.sound.honk()
@@ -463,60 +627,70 @@ class Goose:
                     self._set_task(Task.NAB_MOUSE)
         self._last_mouse_down = mouse_down
 
-    # -----------------------------------------------------------------------
-    # Task: Wander
-    # -----------------------------------------------------------------------
-
     def _set_task(self, task: Task, honk: bool = True):
+        self._last_task_name = self.current_task.value if self.current_task else ""
+        if self.task_state and hasattr(self.task_state, "stage"):
+            self._last_task_name += f" / {self.task_state.stage.value}"
         self.override_extend_neck = False
         self._target_sit_lerp = 0.0
         self._target_neck_tuck = 0.0
         self._freeze_position = False
+        self.rig.is_sleeping = False
+        self.rig.show_sleep_bubbles = False
+        self.rig.peek_eye = 0
+        self.rig.show_exclamation = False
+        self.rig.sleep_phase = 0.0
+        # Drop carried prop on task switch — unless the new task explicitly owns the prop.
+        # CARRY_PROP and KNIFE_THREAT both keep the knife in beak across the transition.
+        # (_pending_drop=True but deadline still 0 means _begin_end_sequence is mid-flight;
+        # let it set the deadline before we fire; any later interrupt clears and drops now).
+        _KEEP_PROP = {Task.CARRY_PROP, Task.KNIFE_THREAT}
+        if task == Task.KNIFE_THREAT:
+            # Threat mode takes ownership of the knife — cancel any pending drop
+            self._pending_drop = False
+            self._pending_drop_deadline = 0.0
+        if task not in _KEEP_PROP and self.carrying_prop is not None:
+            if self._pending_drop and self._pending_drop_deadline == 0.0:
+                pass  # _begin_end_sequence will commit the deadline on return
+            else:
+                self._pending_drop = False
+                self._pending_drop_deadline = 0.0
+                self._release_carried_prop()
         self.current_task = task
         if honk:
             self.sound.honk()
-        if task == Task.WANDER:
-            self._set_speed(SpeedTier.WALK)
-            duration = self._get_random_wander_duration()
-            self.task_wander = WanderState(
-                wander_start_time=self.time_keeper.time,
-                wander_duration=duration,
-            )
-        elif task == Task.NAB_MOUSE:
-            self._set_speed(SpeedTier.CHARGE)
-            self.task_nab_mouse = NabMouseState(
-                chase_start_time=self.time_keeper.time,
-            )
-        elif task == Task.COLLECT_WINDOW_NOTEPAD:
-            from pygoose.goose.windows.notepad_window import NotepadWindow
-            self._start_collect_window(NotepadWindow(font_size=self.config.notepad_font_size))
-        elif task == Task.COLLECT_WINDOW_MEME:
-            from pygoose.goose.windows.meme_window import MemeWindow
-            self._start_collect_window(MemeWindow())
-        elif task == Task.COLLECT_WINDOW_EXEC:
-            self._set_speed(SpeedTier.WALK)
-            direction = self._set_target_offscreen()
-            self.task_collect_window.screen_direction = direction
-            self._set_window_offset_for_direction(direction)
-        elif task == Task.TRACK_MUD:
-            self.task_track_mud = TrackMudState()
-        elif task == Task.WATCH_MOUSE:
-            self._set_speed(SpeedTier.WALK)
-            t = self.time_keeper.time
-            self.task_watch_mouse = WatchMouseState(
-                start_time=t,
-                duration=random_range(WATCH_MOUSE_DURATION_MIN, WATCH_MOUSE_DURATION_MAX),
-                next_bob_time=t + random_range(0.5, 1.5),
-                next_honk_time=t + random_range(2.0, 4.0),
-            )
+        self.task_state = None
+        _BEHAVIOR_ENTER[task](self)
+
+    def _release_carried_prop(self):
+        if self.carrying_prop is None:
+            return
+        from pygoose.goose.props.physics import launch_prop_falling, random_spin
+        fwd      = Vector2.get_from_angle_degrees(self.direction)
+        beak_tip = self.rig.head2_end_point + fwd * 5.0
+        spin = random_spin() if Vector2.magnitude(self.velocity) > 10.0 else 0.0
+        launch_prop_falling(
+            self.carrying_prop,
+            position         = Vector2(beak_tip.x, self.position.y),
+            z                = self.position.y - beak_tip.y,
+            velocity         = Vector2(_random.uniform(-20.0, 20.0), _random.uniform(-5.0, 5.0)),
+            angular_velocity = spin,
+        )
+        self.props.append(self.carrying_prop)
+        self.carrying_prop = None
+
+    def _do_drop_mid_walk(self):
+        self._pending_drop = False
+        self._pending_drop_deadline = 0.0
+        self._freeze_position = False
+        self._release_carried_prop()
 
     def _choose_next_task(self):
-        if DEV_FORCE_TASK:
-            self._set_task(Task(DEV_FORCE_TASK))
+        if self.config.dev_force_task:
+            self._set_task(Task(self.config.dev_force_task))
             return
         task = TASK_WEIGHTED_LIST[self.task_picker_deck.next()]
-        # Skip unimplemented tasks — fall back to wander
-        if task not in (Task.WANDER, Task.TRACK_MUD, Task.NAB_MOUSE, Task.COLLECT_WINDOW_NOTEPAD, Task.COLLECT_WINDOW_MEME, Task.WATCH_MOUSE):
+        if task not in _BEHAVIOR_TICK:
             task = Task.WANDER
         # Respect attack_randomly config
         attack_ok = (self.config.attack_randomly if self.config else True)
@@ -525,7 +699,9 @@ class Goose:
         self._set_task(task)
 
     def _get_random_wander_duration(self) -> float:
-        if DEV_SHORT_WANDER:
+        if self.config.dev_skip_wander:
+            return 0.0
+        if self.config.dev_short_wander:
             return 3.0
         if self.config:
             return random_range(
@@ -534,237 +710,33 @@ class Goose:
             )
         return random_range(20.0, 40.0)
 
-    def _run_wander(self):
-        t = self.time_keeper.time
-        w = self.task_wander
-
-        if t - w.wander_start_time > w.wander_duration:
-            self._choose_next_task()
-            return
-
-        if w.pause_start_time > 0.0:
-            if t - w.pause_start_time > w.pause_duration:
-                w.pause_start_time = -1.0
-                walk_time = random_range(1.0, 6.0)
-                max_walk_dist = walk_time * self.current_speed
-                new_target = Vector2(
-                    random_range(0, self.screen_w),
-                    random_range(0, self.screen_h),
-                )
-                if Vector2.distance(self.position, new_target) > max_walk_dist:
-                    new_target = self.position + Vector2.normalize(new_target - self.position) * max_walk_dist
-                self.target_pos = new_target
-            else:
-                self.velocity = Vector2(0.0, 0.0)
-        else:
-            if Vector2.distance(self.position, self.target_pos) < WANDER_GOOD_ENOUGH_DIST:
-                w.pause_start_time = t
-                w.pause_duration = random_range(1.0, 2.0)
-
     # -----------------------------------------------------------------------
     # Task: NabMouse
     # -----------------------------------------------------------------------
 
     def _get_cursor_pos(self) -> Vector2:
-        from PyQt6.QtGui import QCursor
         p = QCursor.pos()
-        return Vector2(float(p.x()), float(p.y()))
-
-    def _run_nab_mouse(self):
-        t = self.time_keeper.time
-        n = self.task_nab_mouse
-        cursor_pos = self._get_cursor_pos()
-        beak_tip = self.rig.head2_end_point
-
-        if n.stage == NabMouseStage.SEEKING_MOUSE:
-            self._set_speed(SpeedTier.CHARGE)
-            self.target_pos = cursor_pos - (beak_tip - self.position)
-
-            if Vector2.distance(beak_tip, cursor_pos) < MOUSE_GRAB_DISTANCE:
-                n.original_vector_to_mouse = cursor_pos - beak_tip
-                n.grabbed_time = t
-                # Pick drag destination at least 1.2 charge-seconds away
-                drag_to = Vector2(self.position.x, self.position.y)
-                while Vector2.distance(drag_to, self.position) / 400.0 < 1.2:
-                    drag_to = Vector2(random_range(0, self.screen_w), random_range(0, self.screen_h))
-                n.drag_to = drag_to
-                self.target_pos = drag_to
-                self.sound.chomp()
-                n.stage = NabMouseStage.DRAGGING_MOUSE_AWAY
-
-            if t > n.chase_start_time + GIVE_UP_TIME:
-                n.stage = NabMouseStage.DECELERATING
-
-        elif n.stage == NabMouseStage.DRAGGING_MOUSE_AWAY:
-            if Vector2.distance(self.position, self.target_pos) < MOUSE_DROP_DISTANCE:
-                release_cursor_clip()
-                n.stage = NabMouseStage.DECELERATING
-            else:
-                p = min((t - n.grabbed_time) / MOUSE_SUCC_TIME, 1.0)
-                clip_vec = Vector2.lerp(n.original_vector_to_mouse, STRUGGLE_RANGE, p)
-                clip_x = beak_tip.x + (clip_vec.x if clip_vec.x >= 0 else clip_vec.x)
-                clip_y = beak_tip.y + (clip_vec.y if clip_vec.y >= 0 else clip_vec.y)
-                set_cursor_clip(clip_x, clip_y, abs(clip_vec.x), abs(clip_vec.y))
-
-        elif n.stage == NabMouseStage.DECELERATING:
-            mag = Vector2.magnitude(self.velocity)
-            if mag > 0.01:
-                self.target_pos = self.position + Vector2.normalize(self.velocity) * 5.0
-                self.velocity -= Vector2.normalize(self.velocity) * self.current_acceleration * 2.0 * DELTA_TIME
-            if mag < 80.0:
-                release_cursor_clip()
-                self._set_task(Task.WANDER)
+        origin = QApplication.primaryScreen().geometry()
+        return Vector2(float(p.x() - origin.x()), float(p.y() - origin.y()))
 
     # -----------------------------------------------------------------------
     # Task: CollectWindow
-    # -----------------------------------------------------------------------
-
-    def _start_collect_window(self, window):
-        self.task_collect_window = CollectWindowState(main_window=window)
-        self._set_task(Task.COLLECT_WINDOW_EXEC, honk=False)
-
-    def _set_window_offset_for_direction(self, direction: ScreenDirection):
-        cw = self.task_collect_window
-        w = cw.main_window.width() if cw.main_window else 200
-        h = cw.main_window.height() if cw.main_window else 150
-        if direction == ScreenDirection.LEFT:
-            cw.window_offset_to_beak = Vector2(float(w), float(h) / 2)
-        elif direction == ScreenDirection.TOP:
-            cw.window_offset_to_beak = Vector2(float(w) / 2, float(h))
-        elif direction == ScreenDirection.RIGHT:
-            cw.window_offset_to_beak = Vector2(0.0, float(h) / 2)
-
-    def _run_collect_window(self):
-        t = self.time_keeper.time
-        c = self.task_collect_window
-
-        if c.window_closed_early:
-            c.window_closed_early = False
-            self._set_task(Task.NAB_MOUSE)
-            return
-
-        if c.stage == CollectWindowStage.WALKING_OFFSCREEN:
-            if Vector2.distance(self.position, self.target_pos) < 5.0:
-                c.secs_to_wait = random_range(WAIT_TIME_MIN, WAIT_TIME_MAX)
-                c.wait_start_time = t
-                c.stage = CollectWindowStage.WAITING_TO_BRING_WINDOW_BACK
-
-        elif c.stage == CollectWindowStage.WAITING_TO_BRING_WINDOW_BACK:
-            self.velocity = Vector2(0.0, 0.0)
-            if t - c.wait_start_time > c.secs_to_wait:
-                c.main_window.closing.connect(self._on_window_closed_early)
-                QMetaObject.invokeMethod(c.main_window, "show_dialog", Qt.ConnectionType.QueuedConnection)
-
-                d = c.screen_direction
-                w = float(c.main_window.width())
-                h = float(c.main_window.height())
-
-                if d == ScreenDirection.LEFT:
-                    tx = w + random_range(15, 20)
-                    ty = lerp(self.position.y, self.screen_h / 2, random_range(0.2, 0.3))
-                elif d == ScreenDirection.RIGHT:
-                    tx = self.screen_w - (w + random_range(20, 30))
-                    ty = lerp(self.position.y, self.screen_h / 2, random_range(0.2, 0.3))
-                else:
-                    tx = lerp(self.position.x, self.screen_w / 2, random_range(0.2, 0.3))
-                    ty = h + random_range(80, 100)
-
-                self.target_pos = Vector2(
-                    clamp(tx, w + 55, self.screen_w - w - 55),
-                    clamp(ty, h + 80, self.screen_h),
-                )
-                c.stage = CollectWindowStage.DRAGGING_WINDOW_BACK
-
-        elif c.stage == CollectWindowStage.DRAGGING_WINDOW_BACK:
-            if Vector2.distance(self.position, self.target_pos) < 5.0:
-                # Watch window — notepad angers forever, meme angers within 3 seconds
-                from pygoose.goose.windows.notepad_window import NotepadWindow
-                self._placed_window = c.main_window
-                self._placed_window_time = t
-                self._placed_window_closed = False
-                self._placed_window_permanent = isinstance(c.main_window, NotepadWindow)
-                c.main_window.closing.connect(self._on_placed_window_closed)
-                self._set_task(Task.WANDER)
-                return
-
-            self.override_extend_neck = True
-            window_pos = self.rig.head2_end_point - c.window_offset_to_beak
-            c.main_window.move_threadsafe(int(window_pos.x), int(window_pos.y))
 
     def _on_window_closed_early(self):
-        if self.task_collect_window:
-            self.task_collect_window.window_closed_early = True
+        if self.task_state is not None:
+            self.task_state.window_closed_early = True
 
     # -----------------------------------------------------------------------
     # Task: WatchMouse
     # -----------------------------------------------------------------------
 
-    def _run_watch_mouse(self):
-        import random as _random
-        t = self.time_keeper.time
-        w = self.task_watch_mouse
+    # -----------------------------------------------------------------------
+    # Task: FollowMouse
+    # -----------------------------------------------------------------------
 
-        if t - w.start_time > w.duration:
-            self._set_task(Task.WANDER)
-            return
-
-        # Always face cursor
-        cursor_pos = self._get_cursor_pos()
-        to_cursor = cursor_pos - self.position
-        if Vector2.magnitude(to_cursor) > 1.0:
-            self.target_pos = self.position + Vector2.normalize(to_cursor) * 50.0
-
-        # Switch sub-state on timer (SIT holds for at least SIT_MIN_DURATION)
-        sit_held_long_enough = (w.sub_state != WatchSubState.SIT or
-                                w.sit_entered_time < 0 or
-                                t - w.sit_entered_time >= SIT_MIN_DURATION)
-        if t > w.next_sub_change_time and sit_held_long_enough:
-            new_sub = _random.choice([WatchSubState.STAND_STILL, WatchSubState.WALK_SLOW, WatchSubState.SIT])
-            if new_sub == WatchSubState.SIT and w.sub_state != WatchSubState.SIT:
-                w.sit_entered_time = t
-            elif new_sub != WatchSubState.SIT:
-                w.sit_entered_time = -1.0
-            w.sub_state = new_sub
-            w.next_sub_change_time = t + random_range(WATCH_SUB_DURATION_MIN, WATCH_SUB_DURATION_MAX)
-
-        # Sub-state behaviour
-        if w.sub_state == WatchSubState.STAND_STILL:
-            self._freeze_position = True
-            self._target_sit_lerp = 0.0
-        elif w.sub_state == WatchSubState.WALK_SLOW:
-            self._freeze_position = False
-            self._target_sit_lerp = 0.0
-            dist = Vector2.magnitude(to_cursor)
-            if dist > 60.0:
-                self._set_speed(SpeedTier.WALK)
-                self.target_pos = self.position + Vector2.normalize(to_cursor) * 50.0
-            else:
-                self._freeze_position = True
-        elif w.sub_state == WatchSubState.SIT:
-            self._freeze_position = True
-            self._target_sit_lerp = 1.0
-        elif w.sub_state == WatchSubState.CRAWL:
-            self._target_sit_lerp = 1.0
-            self._target_neck_tuck = 1.0
-
-        # Head bob (skip while sitting)
-        if w.sub_state != WatchSubState.SIT:
-            if w.bob_end_time > 0.0:
-                self.override_extend_neck = True
-                if t > w.bob_end_time:
-                    w.bob_end_time = -1.0
-                    self.override_extend_neck = False
-                    w.next_bob_time = t + random_range(BOB_INTERVAL_MIN, BOB_INTERVAL_MAX)
-            elif t > w.next_bob_time:
-                w.bob_end_time = t + BOB_DURATION
-        else:
-            self.override_extend_neck = False
-
-        # Rare honk — only a 30% chance each time the timer fires
-        if t > w.next_honk_time:
-            if _random.random() < 0.30:
-                self.sound.honk()
-            w.next_honk_time = t + random_range(WATCH_HONK_INTERVAL_MIN, WATCH_HONK_INTERVAL_MAX)
+    # -----------------------------------------------------------------------
+    # Task: SneakAttack
+    # -----------------------------------------------------------------------
 
     # -----------------------------------------------------------------------
     # Task: TrackMud
@@ -778,33 +750,3 @@ class Goose:
             self.target_pos = Vector2(-50, lerp(self.position.y, self.screen_h / 2, 0.4))
             return ScreenDirection.LEFT
 
-    def _run_track_mud(self):
-        t = self.time_keeper.time
-        m = self.task_track_mud
-
-        if m.stage == TrackMudStage.DECIDE_TO_RUN:
-            self._set_target_offscreen()
-            self._set_speed(SpeedTier.RUN)
-            m.stage = TrackMudStage.RUNNING_OFFSCREEN
-
-        elif m.stage == TrackMudStage.RUNNING_OFFSCREEN:
-            if Vector2.distance(self.position, self.target_pos) < 5.0:
-                self.target_pos = Vector2(random_range(0, self.screen_w), random_range(0, self.screen_h))
-                m.next_dir_change_time = t + DIR_CHANGE_INTERVAL
-                m.time_to_stop_running = t + AMOK_DURATION
-                self.track_mud_end_time = t + TRACK_MUD_DURATION
-                m.stage = TrackMudStage.RUNNING_WANDERING
-                self.sound.play_mud_squish()
-
-        elif m.stage == TrackMudStage.RUNNING_WANDERING:
-            if (Vector2.distance(self.position, self.target_pos) < 5.0
-                    or t > m.next_dir_change_time):
-                self.target_pos = Vector2(random_range(0, self.screen_w), random_range(0, self.screen_h))
-                m.next_dir_change_time = t + DIR_CHANGE_INTERVAL
-
-            if t > m.time_to_stop_running:
-                self.target_pos = Vector2(
-                    clamp(self.position.x + 30.0, 55.0, self.screen_w - 55.0),
-                    clamp(self.position.y + 3.0, 80.0, self.screen_h - 80.0),
-                )
-                self._set_task(Task.WANDER, honk=False)

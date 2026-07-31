@@ -1,0 +1,112 @@
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            platform: windows
+            archive: zip
+          - os: macos-latest
+            platform: macos
+            archive: tar.gz
+          - os: ubuntu-latest
+            platform: linux
+            archive: tar.gz
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Linux display dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y libgl1 libegl1 libxkbcommon-x11-0
+
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt pyinstaller
+
+      - name: Build
+        run: python -m PyInstaller PyGoose.spec --noconfirm --clean
+
+      - name: Copy user assets (Windows / Linux)
+        if: runner.os != 'macOS'
+        shell: bash
+        run: |
+          mkdir -p dist/PyGoose/assets/images/memes
+          mkdir -p dist/PyGoose/assets/text/notepad_messages
+          cp -r assets/images/memes/. dist/PyGoose/assets/images/memes/
+          cp -r assets/text/notepad_messages/. dist/PyGoose/assets/text/notepad_messages/
+
+      - name: Package macOS dist (onefile binary + user assets)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          mv dist/PyGoose dist/PyGoose_bin
+          mkdir -p dist/PyGoose/assets/images/memes
+          mkdir -p dist/PyGoose/assets/text/notepad_messages
+          mv dist/PyGoose_bin dist/PyGoose/PyGoose
+          chmod +x dist/PyGoose/PyGoose
+          cp -r assets/images/memes/. dist/PyGoose/assets/images/memes/
+          cp -r assets/text/notepad_messages/. dist/PyGoose/assets/text/notepad_messages/
+
+      - name: Archive (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Compress-Archive -Path dist/PyGoose -DestinationPath dist/DesktopGoose-PyGoose-${{ github.ref_name }}-${{ matrix.platform }}.zip
+
+      - name: Archive (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: cd dist && tar -czf DesktopGoose-PyGoose-${{ github.ref_name }}-${{ matrix.platform }}.tar.gz PyGoose
+
+      - name: Archive (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: cd dist && tar -czf DesktopGoose-PyGoose-${{ github.ref_name }}-${{ matrix.platform }}.tar.gz PyGoose
+
+      - name: Upload to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/DesktopGoose-PyGoose-${{ github.ref_name }}-${{ matrix.platform }}.zip
+            dist/DesktopGoose-PyGoose-${{ github.ref_name }}-${{ matrix.platform }}.tar.gz
+
+  source:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create source archive
+        shell: bash
+        run: |
+          zip -r DesktopGoose-PyGoose-${{ github.ref_name }}-python-source.zip . \
+            --exclude '.git/*' \
+            --exclude 'dist/*' \
+            --exclude 'build/*' \
+            --exclude '*/__pycache__/*' \
+            --exclude '*.pyc' \
+            --exclude '*.pyo' \
+            --exclude 'CLAUDE.md'
+
+      - name: Upload to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: DesktopGoose-PyGoose-${{ github.ref_name }}-python-source.zip

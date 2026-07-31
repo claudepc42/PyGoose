@@ -1,25 +1,30 @@
 import os
+import sys
 from PyQt6.QtWidgets import QTextEdit, QVBoxLayout
 from PyQt6.QtCore import Qt, pyqtSlot
 from PyQt6.QtGui import QFont, QIcon, QPainter, QColor, QPen, QFontDatabase
 
+_DEFAULT_FONT_SIZE = 32 if sys.platform == "darwin" else 25
+
 from pygoose.goose.windows.movable_window import MovableWindow
 from pygoose.engine.deck import Deck
-
-ASSETS_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "..", "assets", "text", "notepad_messages")
-FONTS_DIR  = os.path.join(os.path.dirname(__file__), "..", "..", "..", "assets", "fonts")
+from pygoose.paths import resource_path, user_data_path
 
 _fonts_loaded = False
+_app_font_families: list[str] = []
+_notepad_deck: "Deck | None" = None
 
 def _load_fonts():
-    global _fonts_loaded
+    global _fonts_loaded, _app_font_families
     if _fonts_loaded:
         return
-    fonts_dir = os.path.abspath(FONTS_DIR)
+    fonts_dir = resource_path("assets", "fonts")
     if os.path.isdir(fonts_dir):
         for fname in os.listdir(fonts_dir):
             if fname.lower().endswith((".ttf", ".otf")):
-                QFontDatabase.addApplicationFont(os.path.join(fonts_dir, fname))
+                font_id = QFontDatabase.addApplicationFont(os.path.join(fonts_dir, fname))
+                if font_id >= 0:
+                    _app_font_families.extend(QFontDatabase.applicationFontFamilies(font_id))
     _fonts_loaded = True
 
 PAD_YELLOW = QColor(0xFF, 0xF0, 0x80)
@@ -32,7 +37,7 @@ TOP_OFFSET = 30  # height of title bar area before lines start
 
 def _load_phrases() -> list[str]:
     phrases = []
-    assets_dir = os.path.abspath(ASSETS_DIR)
+    assets_dir = user_data_path("assets", "text", "notepad_messages")
     if os.path.isdir(assets_dir):
         for fname in os.listdir(assets_dir):
             if fname.endswith(".txt"):
@@ -48,26 +53,33 @@ def _load_phrases() -> list[str]:
 
 def _handwriting_font(size: int) -> QFont:
     _load_fonts()
+    if _app_font_families:
+        return QFont(_app_font_families[0], size)
+    import sys
     families = QFontDatabase.families()
-    for family in families:
-        if "fonty" in family.lower() or "notestar" in family.lower():
-            return QFont(family, size)
-    for name in ("Segoe Print", "Comic Sans MS"):
-        if name in families:
-            return QFont(name, size)
+    if sys.platform == "darwin":
+        for name in ("Chalkboard SE", "Marker Felt", "Noteworthy", "Bradley Hand", "Comic Sans MS"):
+            if name in families:
+                return QFont(name, size)
+    else:
+        for name in ("Segoe Print", "Comic Sans MS"):
+            if name in families:
+                return QFont(name, size)
     return QFont("", size)
 
 
 class NotepadWindow(MovableWindow):
-    def __init__(self, font_size: int = 25):
+    def __init__(self, font_size: int = _DEFAULT_FONT_SIZE):
         super().__init__()
         self.setWindowTitle('Goose "Not-epad"')
         self.setFixedSize(260, 200)
         self.setWindowFlag(Qt.WindowType.MSWindowsFixedSizeDialogHint, True)
 
         phrases = _load_phrases()
-        deck = Deck(len(phrases))
-        text = phrases[deck.next()]
+        global _notepad_deck
+        if _notepad_deck is None or len(_notepad_deck.indices) != len(phrases):
+            _notepad_deck = Deck(len(phrases))
+        text = phrases[_notepad_deck.next()]
 
         self._edit = QTextEdit(self)
         self._edit.setFont(_handwriting_font(font_size))
@@ -121,5 +133,3 @@ class NotepadWindow(MovableWindow):
     @pyqtSlot()
     def show_dialog(self):
         self.show()
-        self.raise_()
-        self.activateWindow()
